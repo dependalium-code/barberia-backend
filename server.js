@@ -1,14 +1,12 @@
-// server.js – backend mínimo para Render (Express + CORS)
+// server.js – backend mínimo para Render (Express + CORS + Google Calendar)
 const express = require('express');
 const cors = require('cors');
+const { google } = require('googleapis');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // ===== CORS =====
-// Mientras pruebas, puedes permitir todo con '*'.
-// En producción, cambia '*' por tu dominio real de WordPress:
-//   p.ej. ['https://tudominio.com','https://www.tudominio.com']
 const ALLOW_ALL = true;
 const ALLOWED_ORIGINS = ['https://tudominio.com', 'https://www.tudominio.com'];
 
@@ -46,11 +44,28 @@ const pad = n => ('0' + n).slice(-2);
 const toDate = (dateISO, hhmm) => new Date(`${dateISO}T${hhmm}:00`);
 const overlaps = (aStart, aEnd, bStart, bEnd) => (aStart < bEnd && bStart < aEnd);
 
+// ===== Google Calendar =====
+const GOOGLE_KEY_PATH = process.env.GOOGLE_KEY_PATH || '/etc/secrets/google.json';
+const SCOPES = ['https://www.googleapis.com/auth/calendar'];
+
+const auth = new google.auth.GoogleAuth({
+  keyFile: GOOGLE_KEY_PATH,
+  scopes: SCOPES,
+});
+
+const calendar = google.calendar({ version: 'v3', auth });
+
+// Mapa barbero → calendario de Google
+const BARBER_CAL_IDS = {
+  ana:   'xxxxxxxxx@group.calendar.google.com',
+  luis:  'yyyyyyyyy@group.calendar.google.com',
+  marco: 'zzzzzzzzz@group.calendar.google.com'
+};
+
 // ===== Healthcheck =====
 app.get('/', (req, res) => res.json({ ok: true, service: 'barberia-backend' }));
 
 // ===== GET /slots =====
-// /slots?date=YYYY-MM-DD&barberId=ana&serviceId=corte_caballero
 app.get('/slots', (req, res) => {
   const { date, barberId, serviceId } = req.query;
   if (!date || !barberId || !serviceId) {
@@ -82,28 +97,49 @@ app.get('/slots', (req, res) => {
 });
 
 // ===== POST /book =====
-// body: {date,time,barberId,serviceId,name,email?,phone?,notes?}
-app.post('/book', (req, res) => {
-  const { date, time, barberId, serviceId, name } = req.body || {};
-  if (!date || !time || !barberId || !serviceId || !name) {
-    return res.status(400).json({ ok: false, message: 'Datos incompletos' });
+app.post('/book', async (req, res) => {
+  try {
+    const { date, time, barberId, serviceId, name, email, phone, notes } = req.body || {};
+    if (!date || !time || !barberId || !serviceId || !name) {
+      return res.status(400).json({ ok: false, message: 'Datos incompletos' });
+    }
+
+    const minutes = SERVICES_MINUTES[serviceId] || 30;
+    const start = toDate(date, time);
+    const end   = new Date(start.getTime() + minutes * 60000);
+
+    const conflict = BOOKINGS.some(b => {
+      if (b.date !== date || b.barberId !== barberId) return false;
+      const s = toDate(b.date, b.time);
+      const e = new Date(s.getTime() + (SERVICES_MINUTES[b.serviceId] || 30) * 60000);
+      return overlaps(start, end, s, e);
+    });
+
+    if (conflict) return res.status(409).json({ ok: false, message: 'Hora no disponible' });
+
+    BOOKINGS.push({ date, time, barberId, serviceId });
+
+    // ===== Crear evento en Google Calendar =====
+    const calId = BARBER_CAL_IDS[barberId];
+    if (calId) {
+      const event = {
+        summary: `Reserva ${serviceId} – ${name}`,
+        description: `Cliente: ${name}\nEmail: ${email || ''}\nTel: ${phone || ''}\nNotas: ${notes || ''}`,
+        start: { dateTime: `${date}T${time}:00`, timeZone: 'Europe/Madrid' },
+        end:   { dateTime: new Date(end).toISOString(), timeZone: 'Europe/Madrid' }
+      };
+
+      await calendar.events.insert({
+        calendarId: calId,
+        resource: event
+      });
+    }
+
+    res.json({ ok: true, message: 'Reserva creada y enviada a Google Calendar' });
+  } catch (err) {
+    console.error('Error al crear evento en Google Calendar:', err);
+    res.status(500).json({ ok: false, message: 'Error al guardar en Google Calendar' });
   }
-
-  const minutes = SERVICES_MINUTES[serviceId] || 30;
-  const start = toDate(date, time);
-  const end   = new Date(start.getTime() + minutes * 60000);
-
-  const conflict = BOOKINGS.some(b => {
-    if (b.date !== date || b.barberId !== barberId) return false;
-    const s = toDate(b.date, b.time);
-    const e = new Date(s.getTime() + (SERVICES_MINUTES[b.serviceId] || 30) * 60000);
-    return overlaps(start, end, s, e);
-  });
-
-  if (conflict) return res.status(409).json({ ok: false, message: 'Hora no disponible' });
-
-  BOOKINGS.push({ date, time, barberId, serviceId });
-  res.json({ ok: true, message: 'Reserva creada' });
 });
 
 app.listen(PORT, () => {
