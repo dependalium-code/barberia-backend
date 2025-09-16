@@ -1,4 +1,4 @@
-// server.js – backend con Express, CORS y Google Calendar
+// server.js – backend con Express, CORS y Google Calendar (CommonJS)
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -143,5 +143,5 @@ app.post('/book', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Servidor escuchando en puerto ${PORT}`);
+  console.log(`Servidor escuchando en puerto ${PORT} (TZ=Europe/Madrid)`);
 });
