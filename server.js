@@ -1,4 +1,4 @@
-// server.js – backend mínimo para Render (Express + CORS + Google Calendar)
+// server.js – backend con Express, CORS y Google Calendar
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -28,7 +28,7 @@ app.use((req, res, next) => {
 app.use(express.json());
 
 // ===== Datos en memoria (demo) =====
-const BOOKINGS = []; // {date:'YYYY-MM-DD', time:'HH:MM', barberId:'ana', serviceId:'corte_caballero'}
+const BOOKINGS = []; // {date,time,barberId,serviceId}
 
 const SERVICES_MINUTES = {
   corte_caballero: 30, corte_21dias: 30, corte_hasta20: 30, corte_al0: 15,
@@ -55,11 +55,11 @@ const auth = new google.auth.GoogleAuth({
 
 const calendar = google.calendar({ version: 'v3', auth });
 
-// Mapa barbero → calendario de Google
+// Mapear cada barbero a su calendario de Google
 const BARBER_CAL_IDS = {
-  ana:   'xxxxxxxxx@group.calendar.google.com',
-  luis:  'yyyyyyyyy@group.calendar.google.com',
-  marco: 'zzzzzzzzz@group.calendar.google.com'
+  ana:   '9d0890541fd206d30695136ff8e5e4c89563117199c5d4bf3761f955d960fc42@group.calendar.google.com',
+  luis:  '9c75a9a1d75ccebdc4eac6e4181c57fd1da1cabc30fa413e509749455cba70ec@group.calendar.google.com',
+  marco: 'c439a5eb409549264f234d6b9929bd8cfd8d836570997cd450afdefb55097cfa@group.calendar.google.com'
 };
 
 // ===== Healthcheck =====
@@ -119,14 +119,14 @@ app.post('/book', async (req, res) => {
 
     BOOKINGS.push({ date, time, barberId, serviceId });
 
-    // ===== Crear evento en Google Calendar =====
+    // Crear evento en Google Calendar
     const calId = BARBER_CAL_IDS[barberId];
     if (calId) {
       const event = {
         summary: `Reserva ${serviceId} – ${name}`,
         description: `Cliente: ${name}\nEmail: ${email || ''}\nTel: ${phone || ''}\nNotas: ${notes || ''}`,
         start: { dateTime: `${date}T${time}:00`, timeZone: 'Europe/Madrid' },
-        end:   { dateTime: new Date(end).toISOString(), timeZone: 'Europe/Madrid' }
+        end:   { dateTime: end.toISOString(), timeZone: 'Europe/Madrid' }
       };
 
       await calendar.events.insert({
