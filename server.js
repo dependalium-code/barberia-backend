@@ -1,4 +1,4 @@
-// server.js – backend con Express, CORS y Google Calendar (CommonJS)
+// server.js – Express + CORS + Google Calendar (CommonJS, con diagnóstico)
 const express = require('express');
 const cors = require('cors');
 const { google } = require('googleapis');
@@ -28,7 +28,7 @@ app.use((req, res, next) => {
 app.use(express.json());
 
 // ===== Datos en memoria (demo) =====
-const BOOKINGS = []; // {date,time,barberId,serviceId}
+const BOOKINGS = [];
 
 const SERVICES_MINUTES = {
   corte_caballero: 30, corte_21dias: 30, corte_hasta20: 30, corte_al0: 15,
@@ -44,18 +44,33 @@ const pad = n => ('0' + n).slice(-2);
 const toDate = (dateISO, hhmm) => new Date(`${dateISO}T${hhmm}:00`);
 const overlaps = (aStart, aEnd, bStart, bEnd) => (aStart < bEnd && bStart < aEnd);
 
-// ===== Google Calendar =====
+// ===== Google Calendar Auth (acepta archivo o variable) =====
 const GOOGLE_KEY_PATH = process.env.GOOGLE_KEY_PATH || '/etc/secrets/google.json';
+const GOOGLE_CREDENTIALS = process.env.GOOGLE_CREDENTIALS; // JSON string opcional
 const SCOPES = ['https://www.googleapis.com/auth/calendar'];
 
-const auth = new google.auth.GoogleAuth({
-  keyFile: GOOGLE_KEY_PATH,
-  scopes: SCOPES,
-});
+let auth;
+if (GOOGLE_CREDENTIALS) {
+  // Credenciales en variable de entorno (JSON stringificado)
+  const creds = JSON.parse(GOOGLE_CREDENTIALS);
+  auth = new google.auth.JWT(
+    creds.client_email,
+    null,
+    creds.private_key,
+    SCOPES
+  );
+  console.log('Auth: usando GOOGLE_CREDENTIALS (env var).');
+} else {
+  auth = new google.auth.GoogleAuth({
+    keyFile: GOOGLE_KEY_PATH,
+    scopes: SCOPES,
+  });
+  console.log('Auth: usando keyFile:', GOOGLE_KEY_PATH);
+}
 
 const calendar = google.calendar({ version: 'v3', auth });
 
-// Mapear cada barbero a su calendario de Google
+// ===== IDs de calendarios =====
 const BARBER_CAL_IDS = {
   ana:   '9d0890541fd206d30695136ff8e5e4c89563117199c5d4bf3761f955d960fc42@group.calendar.google.com',
   luis:  '9c75a9a1d75ccebdc4eac6e4181c57fd1da1cabc30fa413e509749455cba70ec@group.calendar.google.com',
@@ -64,6 +79,32 @@ const BARBER_CAL_IDS = {
 
 // ===== Healthcheck =====
 app.get('/', (req, res) => res.json({ ok: true, service: 'barberia-backend' }));
+
+// Endpoint de prueba de inserción
+app.get('/test-insert', async (req, res) => {
+  try {
+    const barber = (req.query.barber || 'ana').toLowerCase();
+    const calId = BARBER_CAL_IDS[barber];
+    if (!calId) return res.status(400).json({ ok:false, message:`Barbero desconocido: ${barber}` });
+
+    const now = new Date();
+    const end = new Date(now.getTime() + 30*60000);
+
+    const event = {
+      summary: 'TEST RESERVA',
+      description: 'Evento de prueba insertado desde backend',
+      start: { dateTime: now.toISOString(), timeZone: 'Europe/Madrid' },
+      end:   { dateTime: end.toISOString(), timeZone: 'Europe/Madrid' }
+    };
+
+    const resp = await calendar.events.insert({ calendarId: calId, resource: event });
+    return res.json({ ok:true, id: resp.data.id, htmlLink: resp.data.htmlLink });
+  } catch (err) {
+    const msg = extractGCalError(err);
+    console.error('Error en /test-insert:', msg, fullErrForLogs(err));
+    return res.status(500).json({ ok:false, message: msg });
+  }
+});
 
 // ===== GET /slots =====
 app.get('/slots', (req, res) => {
@@ -114,12 +155,11 @@ app.post('/book', async (req, res) => {
       const e = new Date(s.getTime() + (SERVICES_MINUTES[b.serviceId] || 30) * 60000);
       return overlaps(start, end, s, e);
     });
-
     if (conflict) return res.status(409).json({ ok: false, message: 'Hora no disponible' });
 
     BOOKINGS.push({ date, time, barberId, serviceId });
 
-    // Crear evento en Google Calendar
+    // Insertar en Google Calendar
     const calId = BARBER_CAL_IDS[barberId];
     if (calId) {
       const event = {
@@ -129,19 +169,33 @@ app.post('/book', async (req, res) => {
         end:   { dateTime: end.toISOString(), timeZone: 'Europe/Madrid' }
       };
 
-      await calendar.events.insert({
-        calendarId: calId,
-        resource: event
-      });
+      await calendar.events.insert({ calendarId: calId, resource: event });
     }
 
     res.json({ ok: true, message: 'Reserva creada y enviada a Google Calendar' });
   } catch (err) {
-    console.error('Error al crear evento en Google Calendar:', err);
-    res.status(500).json({ ok: false, message: 'Error al guardar en Google Calendar' });
+    const msg = extractGCalError(err);
+    console.error('Error al crear evento en Google Calendar:', msg, fullErrForLogs(err));
+    res.status(500).json({ ok: false, message: `Google Calendar: ${msg}` });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Servidor escuchando en puerto ${PORT} (TZ=Europe/Madrid)`);
+  console.log(`Servidor escuchando en puerto ${PORT} (TZ=${process.env.TZ || 'Europe/Madrid'})`);
 });
+
+// ===== Helpers de diagnóstico =====
+function extractGCalError(err){
+  // Intenta sacar el mensaje más útil de la respuesta de Google
+  if (err && err.response && err.response.data && err.response.data.error) {
+    const e = err.response.data.error;
+    // ejemplos: 401 invalid credentials, 403 insufficientPermissions,
+    // 404 notFound (ID calendario incorrecto), 400 invalidArgument, etc.
+    return `${e.code} ${e.status || ''} ${e.message || ''}`.trim();
+  }
+  return err?.message || 'Error desconocido';
+}
+function fullErrForLogs(err){
+  try { return JSON.stringify(err.response?.data || err, null, 2); }
+  catch { return err; }
+}
